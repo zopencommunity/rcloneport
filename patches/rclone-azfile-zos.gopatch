@@ -1,0 +1,30 @@
+diff --git a/sdk/storage/azfile/file/mmf_zos.go b/sdk/storage/azfile/file/mmf_zos.go
+new file mode 100644
+index 00000000..e8664d28
+--- /dev/null
++++ b/sdk/storage/azfile/file/mmf_zos.go
+@@ -0,0 +1,24 @@
++//go:build zos
++
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT License. See License.txt in the project root for license information.
++
++package file
++
++import "fmt"
++
++// mmb is a memory mapped buffer (in-memory fallback for z/OS which lacks mmap).
++type mmb []byte
++
++// newMMB creates a new in-memory buffer with the specified size.
++func newMMB(size int64) (mmb, error) {
++	return make(mmb, size), nil
++}
++
++// delete cleans up the memory mapped buffer.
++func (m *mmb) delete() {
++	if m == nil {
++		panic(fmt.Sprintf("delete called on nil mmb"))
++	}
++	*m = nil
++}

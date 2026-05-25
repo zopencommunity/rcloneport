@@ -1,0 +1,159 @@
+diff --git a/flock_zos.go b/flock_zos.go
+new file mode 100644
+index 0000000..c6cb209
+--- /dev/null
++++ b/flock_zos.go
+@@ -0,0 +1,153 @@
++//go:build zos
++
++// Copyright 2015 Tim Heckman. All rights reserved.
++// Copyright 2018-2025 The Gofrs. All rights reserved.
++// Use of this source code is governed by the BSD 3-Clause
++// license that can be found in the LICENSE file.
++
++package flock
++
++import (
++	"errors"
++	"os"
++
++	"golang.org/x/sys/unix"
++)
++
++func (f *Flock) Lock() error {
++	return f.lock(&f.l, unix.LOCK_EX)
++}
++
++func (f *Flock) RLock() error {
++	return f.lock(&f.r, unix.LOCK_SH)
++}
++
++func (f *Flock) lock(locked *bool, flag int) error {
++	f.m.Lock()
++	defer f.m.Unlock()
++
++	if *locked {
++		return nil
++	}
++
++	if f.fh == nil {
++		if err := f.setFh(f.flag); err != nil {
++			return err
++		}
++
++		defer f.ensureFhState()
++	}
++
++	err := unix.Flock(int(f.fh.Fd()), flag)
++	if err != nil {
++		shouldRetry, reopenErr := f.reopenFDOnError(err)
++		if reopenErr != nil {
++			return reopenErr
++		}
++
++		if !shouldRetry {
++			return err
++		}
++
++		err = unix.Flock(int(f.fh.Fd()), flag)
++		if err != nil {
++			return err
++		}
++	}
++
++	*locked = true
++
++	return nil
++}
++
++func (f *Flock) Unlock() error {
++	f.m.Lock()
++	defer f.m.Unlock()
++
++	if (!f.l && !f.r) || f.fh == nil {
++		return nil
++	}
++
++	err := unix.Flock(int(f.fh.Fd()), unix.LOCK_UN)
++	if err != nil {
++		return err
++	}
++
++	f.reset()
++
++	return nil
++}
++
++func (f *Flock) TryLock() (bool, error) {
++	return f.try(&f.l, unix.LOCK_EX)
++}
++
++func (f *Flock) TryRLock() (bool, error) {
++	return f.try(&f.r, unix.LOCK_SH)
++}
++
++func (f *Flock) try(locked *bool, flag int) (bool, error) {
++	f.m.Lock()
++	defer f.m.Unlock()
++
++	if *locked {
++		return true, nil
++	}
++
++	if f.fh == nil {
++		if err := f.setFh(f.flag); err != nil {
++			return false, err
++		}
++
++		defer f.ensureFhState()
++	}
++
++	var retried bool
++
++retry:
++	err := unix.Flock(int(f.fh.Fd()), flag|unix.LOCK_NB)
++
++	switch {
++	case errors.Is(err, unix.EWOULDBLOCK):
++		return false, nil
++	case err == nil:
++		*locked = true
++		return true, nil
++	}
++
++	if !retried {
++		shouldRetry, reopenErr := f.reopenFDOnError(err)
++		if reopenErr != nil {
++			return false, reopenErr
++		} else if shouldRetry {
++			retried = true
++			goto retry
++		}
++	}
++
++	return false, err
++}
++
++func (f *Flock) reopenFDOnError(err error) (bool, error) {
++	if !errors.Is(err, unix.EIO) && !errors.Is(err, unix.EBADF) {
++		return false, nil
++	}
++
++	st, err := f.fh.Stat()
++	if err != nil {
++		return false, nil
++	}
++
++	if st.Mode()&f.perm != f.perm {
++		return false, nil
++	}
++
++	f.resetFh()
++
++	err = f.setFh(f.flag | os.O_RDWR)
++	if err != nil {
++		return false, err
++	}
++
++	return true, nil
++}

@@ -1,0 +1,150 @@
+# bump: rclone-version /RCLONE_VERSION="(.*)"/ https://github.com/rclone/rclone.git|semver:*
+RCLONE_VERSION="1.74.1"
+
+###
+### Build control file for the rclone port
+###
+
+export ZOPEN_NAME="rclone"
+export ZOPEN_PROJECT_NAME="rclone"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_STABLE_URL="https://github.com/rclone/rclone.git"
+export ZOPEN_STABLE_TAG="v${RCLONE_VERSION}"
+export ZOPEN_STABLE_DEPS="make coreutils git check_go"
+
+export ZOPEN_DEV_URL=""
+export ZOPEN_DEV_DEPS=""
+
+export ZOPEN_CATEGORIES="utilities networking"
+export ZOPEN_RUNTIME_DEPS=""
+export ZOPEN_SYSTEM_PREREQ=""
+
+export ZOPEN_COMP="GO"
+export ZOPEN_CONFIGURE="zopen_config"
+export ZOPEN_CONFIGURE_MINIMAL=1
+export ZOPEN_MAKE="skip"
+export ZOPEN_INSTALL="zopen_install"
+export ZOPEN_CHECK="skip"
+export ZOPEN_CLEAN="zopen_clean"
+
+zopen_init()
+{
+  export CGO_ENABLED=0
+  export GOMAXPROCS=1
+  export GOPATH="$(cd .. && pwd)/go-path"
+  export GOMODCACHE="${GOPATH}/pkg/mod"
+  export GOTMPDIR="/tmp/rcloneport-gotmp-${USER:-itodoro}"
+  mkdir -p "${GOTMPDIR}" "${GOMODCACHE}"
+
+  if [ -n "${GOROOT:-}" ] && [ -d "${GOROOT}/bin" ]; then
+    export PATH="${PATH}:${GOROOT}/bin"
+  fi
+
+  export GOBIN="${ZOPEN_INSTALL_DIR}/bin"
+  mkdir -p "${GOBIN}"
+}
+
+clone_module()
+{
+  repo="$1"
+  dir="$2"
+  ref="$3"
+
+  if [ ! -d "${dir}/.git" ]; then
+    git clone "${repo}" "${dir}"
+  fi
+
+  git -C "${dir}" fetch --tags --force
+  git -C "${dir}" checkout --force "${ref}"
+  git -C "${dir}" clean -fdx
+}
+
+apply_port_patch()
+{
+  dir="$1"
+  patch="$2"
+
+  if ! git -C "${dir}" apply --check "../patches/${patch}"; then
+    echo "Patch ${patch} did not apply cleanly in ${dir}; assuming it was already applied or needs refresh."
+    git -C "${dir}" apply --reverse --check "../patches/${patch}" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+
+  git -C "${dir}" apply "../patches/${patch}"
+}
+
+zopen_config()
+{
+  PORT_ROOT="$(dirname "${GOPATH}")"
+  cd "${PORT_ROOT}"
+
+  clone_module "${ZOPEN_STABLE_URL}" rclone "v${RCLONE_VERSION}"
+  clone_module https://github.com/diskfs/go-diskfs.git go-diskfs v1.7.0
+  clone_module https://github.com/adrg/xdg.git xdg v0.5.3
+  clone_module https://github.com/gofrs/flock.git flock v0.13.0
+  clone_module https://github.com/atotto/clipboard.git clipboard v0.1.4
+  clone_module https://github.com/Azure/azure-sdk-for-go.git azfile sdk/storage/azfile/v1.5.4
+
+  apply_port_patch rclone rclone-zos.gopatch || return 1
+  apply_port_patch go-diskfs rclone-go-diskfs-zos.gopatch || return 1
+  apply_port_patch xdg rclone-xdg-zos.gopatch || return 1
+  apply_port_patch flock rclone-flock-zos.gopatch || return 1
+  apply_port_patch clipboard rclone-clipboard-zos.gopatch || return 1
+  apply_port_patch azfile rclone-azfile-zos.gopatch || return 1
+
+  rm -f go.work go.work.sum
+  mkdir -p "${GOTMPDIR}"
+  go work init \
+    ./rclone \
+    ./go-diskfs \
+    ./xdg \
+    ./flock \
+    ./clipboard \
+    ./azfile/sdk/storage/azfile
+
+  cd rclone
+  mkdir -p "${GOTMPDIR}"
+  go mod download
+  cd "${PORT_ROOT}"
+}
+
+zopen_install()
+{
+  cd "$(dirname "${GOPATH}")"
+
+  mkdir -p "${GOBIN}" "${GOTMPDIR}"
+  go build -buildvcs=false \
+    -ldflags="-s -w -X github.com/rclone/rclone/fs.Version=v${RCLONE_VERSION}" \
+    -o "${GOBIN}/rclone" \
+    ./rclone
+}
+
+zopen_check_results()
+{
+  echo "actualFailures:0"
+  echo "totalTests:1"
+  echo "expectedFailures:0"
+  echo "expectedTotalTests:1"
+}
+
+zopen_get_version()
+{
+  echo "${RCLONE_VERSION}"
+}
+
+zopen_clean()
+{
+  PORT_ROOT="$(dirname "${GOPATH}")"
+  cd "${PORT_ROOT}"
+  chmod -R u+w "${PORT_ROOT}/go-path" 2>/dev/null || true
+  rm -rf \
+    "${PORT_ROOT}/go.work" \
+    "${PORT_ROOT}/go.work.sum" \
+    "${PORT_ROOT}/go-path" \
+    "${PORT_ROOT}/rclone" \
+    "${PORT_ROOT}/go-diskfs" \
+    "${PORT_ROOT}/xdg" \
+    "${PORT_ROOT}/flock" \
+    "${PORT_ROOT}/clipboard" \
+    "${PORT_ROOT}/azfile"
+}

@@ -1,0 +1,199 @@
+diff --git a/internal/pathutil/pathutil_zos.go b/internal/pathutil/pathutil_zos.go
+new file mode 100644
+index 0000000..8284a3a
+--- /dev/null
++++ b/internal/pathutil/pathutil_zos.go
+@@ -0,0 +1,37 @@
++//go:build zos
++
++package pathutil
++
++import (
++	"errors"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++func UserHomeDir() string {
++	if home := os.Getenv("HOME"); home != "" {
++		return home
++	}
++	return "/"
++}
++
++func Exists(path string) bool {
++	_, err := os.Stat(path)
++	return err == nil || errors.Is(err, fs.ErrExist)
++}
++
++func ExpandHome(path string) string {
++	home := UserHomeDir()
++	if path == "" || home == "" {
++		return path
++	}
++	if path[0] == '~' {
++		return filepath.Join(home, path[1:])
++	}
++	if strings.HasPrefix(path, "$HOME") {
++		return filepath.Join(home, path[5:])
++	}
++	return path
++}
+diff --git a/internal/userdirs/config_zos.go b/internal/userdirs/config_zos.go
+new file mode 100644
+index 0000000..06006fc
+--- /dev/null
++++ b/internal/userdirs/config_zos.go
+@@ -0,0 +1,76 @@
++//go:build zos
++
++package userdirs
++
++import (
++	"bufio"
++	"io"
++	"os"
++	"strings"
++
++	"github.com/adrg/xdg/internal/pathutil"
++)
++
++func ParseConfigFile(name string) (*Directories, error) {
++	f, err := os.Open(name)
++	if err != nil {
++		return nil, err
++	}
++	defer f.Close()
++
++	return ParseConfig(f)
++}
++
++func ParseConfig(r io.Reader) (*Directories, error) {
++	dirs := &Directories{}
++	fieldsMap := map[string]*string{
++		EnvDesktopDir:     &dirs.Desktop,
++		EnvDownloadDir:    &dirs.Download,
++		EnvDocumentsDir:   &dirs.Documents,
++		EnvMusicDir:       &dirs.Music,
++		EnvPicturesDir:    &dirs.Pictures,
++		EnvVideosDir:      &dirs.Videos,
++		EnvTemplatesDir:   &dirs.Templates,
++		EnvPublicShareDir: &dirs.PublicShare,
++	}
++
++	scanner := bufio.NewScanner(r)
++	for scanner.Scan() {
++		line := strings.TrimSpace(scanner.Text())
++		if len(line) == 0 || line[0] == '#' {
++			continue
++		}
++		if !strings.HasPrefix(line, "XDG_") {
++			continue
++		}
++
++		parts := strings.Split(line, "=")
++		if len(parts) < 2 {
++			continue
++		}
++
++		field, ok := fieldsMap[strings.TrimSpace(parts[0])]
++		if !ok {
++			continue
++		}
++
++		runes := []rune(strings.TrimSpace(parts[1]))
++
++		lenRunes := len(runes)
++		if lenRunes <= 2 || runes[0] != '"' {
++			continue
++		}
++
++		for i := 1; i < lenRunes; i++ {
++			if runes[i] == '"' {
++				*field = pathutil.ExpandHome(string(runes[1:i]))
++				break
++			}
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		return nil, err
++	}
++
++	return dirs, nil
++}
+diff --git a/paths_zos.go b/paths_zos.go
+new file mode 100644
+index 0000000..ad4e08f
+--- /dev/null
++++ b/paths_zos.go
+@@ -0,0 +1,68 @@
++//go:build zos
++
++package xdg
++
++import (
++	"os"
++	"path/filepath"
++	"strconv"
++
++	"github.com/adrg/xdg/internal/pathutil"
++	"github.com/adrg/xdg/internal/userdirs"
++)
++
++func initDirs(home string) {
++	initBaseDirs(home)
++	initUserDirs(home, baseDirs.configHome)
++}
++
++func initBaseDirs(home string) {
++	baseDirs.dataHome = pathutil.EnvPath(envDataHome, filepath.Join(home, ".local", "share"))
++	baseDirs.data = pathutil.EnvPathList(envDataDirs, "/usr/local/share", "/usr/share")
++	baseDirs.configHome = pathutil.EnvPath(envConfigHome, filepath.Join(home, ".config"))
++	baseDirs.config = pathutil.EnvPathList(envConfigDirs, "/etc/xdg")
++	baseDirs.stateHome = pathutil.EnvPath(envStateHome, filepath.Join(home, ".local", "state"))
++	baseDirs.cacheHome = pathutil.EnvPath(envCacheHome, filepath.Join(home, ".cache"))
++	baseDirs.runtime = pathutil.EnvPath(envRuntimeDir, filepath.Join("/tmp", strconv.Itoa(os.Getuid())))
++
++	baseDirs.binHome = pathutil.EnvPath(envBinHome, filepath.Join(home, ".local", "bin"))
++
++	appDirs := []string{
++		filepath.Join(baseDirs.dataHome, "applications"),
++		filepath.Join(home, ".local/share/applications"),
++		"/usr/local/share/applications",
++		"/usr/share/applications",
++	}
++
++	fontDirs := []string{
++		filepath.Join(baseDirs.dataHome, "fonts"),
++		filepath.Join(home, ".fonts"),
++		filepath.Join(home, ".local/share/fonts"),
++		"/usr/local/share/fonts",
++		"/usr/share/fonts",
++	}
++
++	for _, dir := range baseDirs.data {
++		appDirs = append(appDirs, filepath.Join(dir, "applications"))
++		fontDirs = append(fontDirs, filepath.Join(dir, "fonts"))
++	}
++
++	baseDirs.applications = pathutil.Unique(appDirs)
++	baseDirs.fonts = pathutil.Unique(fontDirs)
++}
++
++func initUserDirs(home, configHome string) {
++	dirs, err := userdirs.ParseConfigFile(filepath.Join(configHome, "user-dirs.dirs"))
++	if err != nil {
++		dirs = &UserDirectories{}
++	}
++
++	UserDirs.Desktop = pathutil.EnvPath(userdirs.EnvDesktopDir, dirs.Desktop, filepath.Join(home, "Desktop"))
++	UserDirs.Download = pathutil.EnvPath(userdirs.EnvDownloadDir, dirs.Download, filepath.Join(home, "Downloads"))
++	UserDirs.Documents = pathutil.EnvPath(userdirs.EnvDocumentsDir, dirs.Documents, filepath.Join(home, "Documents"))
++	UserDirs.Music = pathutil.EnvPath(userdirs.EnvMusicDir, dirs.Music, filepath.Join(home, "Music"))
++	UserDirs.Pictures = pathutil.EnvPath(userdirs.EnvPicturesDir, dirs.Pictures, filepath.Join(home, "Pictures"))
++	UserDirs.Videos = pathutil.EnvPath(userdirs.EnvVideosDir, dirs.Videos, filepath.Join(home, "Videos"))
++	UserDirs.Templates = pathutil.EnvPath(userdirs.EnvTemplatesDir, dirs.Templates, filepath.Join(home, "Templates"))
++	UserDirs.PublicShare = pathutil.EnvPath(userdirs.EnvPublicShareDir, dirs.PublicShare, filepath.Join(home, "Public"))
++}

@@ -1,0 +1,131 @@
+diff --git a/backend/local/lchmod_unix.go b/backend/local/lchmod_unix.go
+index f1fdc47..4b24db1 100644
+--- a/backend/local/lchmod_unix.go
++++ b/backend/local/lchmod_unix.go
+@@ -1,4 +1,4 @@
+-//go:build !windows && !plan9 && !js && !linux
++//go:build !windows && !plan9 && !js && !linux && !zos
+ 
+ package local
+ 
+diff --git a/backend/local/lchmod_zos.go b/backend/local/lchmod_zos.go
+new file mode 100644
+index 0000000..a3479c6
+--- /dev/null
++++ b/backend/local/lchmod_zos.go
+@@ -0,0 +1,12 @@
++//go:build zos
++
++package local
++
++import "os"
++
++const haveLChmod = false
++
++// lChmod on z/OS is a no-op: fchmodat does not support AT_SYMLINK_NOFOLLOW.
++func lChmod(name string, mode os.FileMode) error {
++	return nil
++}
+diff --git a/backend/local/metadata_zos.go b/backend/local/metadata_zos.go
+new file mode 100644
+index 0000000..6c77295
+--- /dev/null
++++ b/backend/local/metadata_zos.go
+@@ -0,0 +1,54 @@
++//go:build zos
++
++package local
++
++import (
++	"fmt"
++	"os"
++	"syscall"
++	"time"
++
++	"github.com/rclone/rclone/fs"
++)
++
++// readTime returns the time specified from the os.FileInfo using z/OS Stat_t.
++// z/OS uses the same Atim/Ctim/Mtim Timespec field names as Linux.
++func readTime(t timeType, fi os.FileInfo) time.Time {
++	stat, ok := fi.Sys().(*syscall.Stat_t)
++	if !ok {
++		fs.Debugf(nil, "didn't return Stat_t as expected")
++		return fi.ModTime()
++	}
++	switch t {
++	case aTime:
++		return time.Unix(stat.Atim.Unix())
++	case cTime:
++		return time.Unix(stat.Ctim.Unix())
++	}
++	return fi.ModTime()
++}
++
++// readMetadataFromFile reads file metadata into m on z/OS.
++func (o *Object) readMetadataFromFile(m *fs.Metadata) (err error) {
++	info, err := o.fs.lstat(o.path)
++	if err != nil {
++		return err
++	}
++	stat, ok := info.Sys().(*syscall.Stat_t)
++	if !ok {
++		fs.Debugf(o, "didn't return Stat_t as expected")
++		return nil
++	}
++	m.Set("mode", fmt.Sprintf("%0o", stat.Mode))
++	m.Set("uid", fmt.Sprintf("%d", stat.Uid))
++	m.Set("gid", fmt.Sprintf("%d", stat.Gid))
++	if stat.Rdev != 0 {
++		m.Set("rdev", fmt.Sprintf("%x", stat.Rdev))
++	}
++	setTime := func(key string, t syscall.Timespec) {
++		m.Set(key, time.Unix(t.Unix()).Format(metadataTimeFormat))
++	}
++	setTime("atime", stat.Atim)
++	setTime("mtime", stat.Mtim)
++	return nil
++}
+diff --git a/fs/log/redirect_stderr.go b/fs/log/redirect_stderr.go
+index 552ca49..4a9ab9a 100644
+--- a/fs/log/redirect_stderr.go
++++ b/fs/log/redirect_stderr.go
+@@ -1,6 +1,6 @@
+ // Log the panic to the log file - for oses which can't do this
+ 
+-//go:build !windows && !darwin && !dragonfly && !freebsd && !linux && !nacl && !netbsd && !openbsd && !aix
++//go:build !windows && !darwin && !dragonfly && !freebsd && !linux && !nacl && !netbsd && !openbsd && !aix && !zos
+ 
+ package log
+ 
+diff --git a/lib/diskusage/diskusage_zos.go b/lib/diskusage/diskusage_zos.go
+new file mode 100644
+index 0000000..e61de6a
+--- /dev/null
++++ b/lib/diskusage/diskusage_zos.go
+@@ -0,0 +1,25 @@
++//go:build zos
++
++package diskusage
++
++import (
++	"golang.org/x/sys/unix"
++)
++
++// New returns the disk status for dir on z/OS using Statfs.
++//
++// May return Unsupported error if it doesn't work on this platform.
++func New(dir string) (info Info, err error) {
++	var statfs unix.Statfs_t
++	err = unix.Statfs(dir, &statfs)
++	if err != nil {
++		return info, err
++	}
++	//nolint:unconvert
++	info.Free = uint64(statfs.Bfree) * uint64(statfs.Bsize)
++	//nolint:unconvert
++	info.Available = uint64(statfs.Bavail) * uint64(statfs.Bsize)
++	//nolint:unconvert
++	info.Total = uint64(statfs.Blocks) * uint64(statfs.Bsize)
++	return info, nil
++}
