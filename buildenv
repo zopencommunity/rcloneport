@@ -1,5 +1,5 @@
 # bump: rclone-version /RCLONE_VERSION="(.*)"/ https://github.com/rclone/rclone.git|semver:*
-RCLONE_VERSION="1.74.1"
+RCLONE_VERSION="1.74.2"
 
 ###
 ### Build control file for the rclone port
